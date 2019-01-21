@@ -21,6 +21,7 @@ import org.linlinjava.litemall.core.util.JacksonUtil;
 import org.linlinjava.litemall.core.util.ResponseUtil;
 import org.linlinjava.litemall.db.domain.*;
 import org.linlinjava.litemall.db.service.*;
+import org.linlinjava.litemall.db.util.CouponUserConstant;
 import org.linlinjava.litemall.db.util.OrderHandleOption;
 import org.linlinjava.litemall.db.util.OrderUtil;
 import org.linlinjava.litemall.wx.annotation.LoginUser;
@@ -44,6 +45,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import static org.linlinjava.litemall.wx.util.WxResponseCode.*;
 
 /**
  * 订单服务
@@ -104,6 +107,12 @@ public class WxOrderController {
     private ExpressService expressService;
     @Autowired
     private LitemallCommentService commentService;
+    @Autowired
+    private LitemallCouponService couponService;
+    @Autowired
+    private LitemallCouponUserService couponUserService;
+    @Autowired
+    private CouponVerifyService couponVerifyService;
 
     private String detailedAddress(LitemallAddress litemallAddress) {
         Integer provinceId = litemallAddress.getProvinceId();
@@ -197,10 +206,10 @@ public class WxOrderController {
         // 订单信息
         LitemallOrder order = orderService.findById(orderId);
         if (null == order) {
-            return ResponseUtil.fail(403, "订单不存在");
+            return ResponseUtil.fail(ORDER_UNKNOWN, "订单不存在");
         }
         if (!order.getUserId().equals(userId)) {
-            return ResponseUtil.fail(403, "不是当前用户的订单");
+            return ResponseUtil.fail(ORDER_INVALID, "不是当前用户的订单");
         }
         Map<String, Object> orderVo = new HashMap<String, Object>();
         orderVo.put("id", order.getId());
@@ -239,7 +248,7 @@ public class WxOrderController {
      * <p>
      * 1. 创建订单表项和订单商品表项;
      * 2. 购物车清空;
-     * 3. TODO 优惠券设置已用;
+     * 3. 优惠券设置已用;
      * 4. 商品货品库存减少;
      * 5. 如果是团购商品，则创建团购活动表项。
      *
@@ -271,7 +280,7 @@ public class WxOrderController {
             }
             //团购活动已经过期
             if (grouponRulesService.isExpired(rules)) {
-                return ResponseUtil.fail(402, "团购活动已过期!");
+                return ResponseUtil.fail(GROUPON_EXPIRED, "团购活动已过期!");
             }
         }
 
@@ -284,10 +293,6 @@ public class WxOrderController {
         if (checkedAddress == null) {
             return ResponseUtil.badArgument();
         }
-
-        // 获取可用的优惠券信息
-        // 使用优惠券减免的金额
-        BigDecimal couponPrice = new BigDecimal(0.00);
 
         // 团购优惠
         BigDecimal grouponPrice = new BigDecimal(0.00);
@@ -318,6 +323,19 @@ public class WxOrderController {
             }
         }
 
+        // 获取可用的优惠券信息
+        // 使用优惠券减免的金额
+        BigDecimal couponPrice = new BigDecimal(0.00);
+        // 如果couponId=0则没有优惠券，couponId=-1则不使用优惠券
+        if(couponId != 0 && couponId != -1){
+            LitemallCoupon coupon = couponVerifyService.checkCoupon(userId, couponId, checkedGoodsPrice);
+            if(coupon == null){
+                return ResponseUtil.badArgumentValue();
+            }
+            couponPrice = coupon.getDiscount();
+        }
+
+
         // 根据订单商品总价计算运费，满足条件（例如88元）则免运费，否则需要支付运费（例如8元）；
         BigDecimal freightPrice = new BigDecimal(0.00);
         if (checkedGoodsPrice.compareTo(SystemConfig.getFreightLimit()) < 0) {
@@ -329,6 +347,7 @@ public class WxOrderController {
 
         // 订单费用
         BigDecimal orderTotalPrice = checkedGoodsPrice.add(freightPrice).subtract(couponPrice);
+        // 最终支付费用
         BigDecimal actualPrice = orderTotalPrice.subtract(integralPrice);
 
         // 开启事务管理
@@ -366,6 +385,7 @@ public class WxOrderController {
             orderService.add(order);
             orderId = order.getId();
 
+            // 添加订单商品表项
             for (LitemallCart cartGoods : checkedGoodsList) {
                 // 订单商品
                 LitemallOrderGoods orderGoods = new LitemallOrderGoods();
@@ -380,7 +400,6 @@ public class WxOrderController {
                 orderGoods.setSpecifications(cartGoods.getSpecifications());
                 orderGoods.setAddTime(LocalDateTime.now());
 
-                // 添加订单商品表项
                 orderGoodsService.add(orderGoods);
             }
 
@@ -399,6 +418,15 @@ public class WxOrderController {
                 if (productService.reduceStock(productId, checkGoods.getNumber()) == 0) {
                     throw new Exception("商品货品库存减少失败");
                 }
+            }
+
+            // 如果使用了优惠券，设置优惠券使用状态
+            if(couponId != 0 && couponId != -1){
+                LitemallCouponUser couponUser = couponUserService.queryOne(userId, couponId);
+                couponUser.setStatus(CouponUserConstant.STATUS_USED);
+                couponUser.setUsedTime(LocalDateTime.now());
+                couponUser.setOrderId(orderId);
+                couponUserService.update(couponUser);
             }
 
             //如果是团购项目，添加团购信息
@@ -426,7 +454,7 @@ public class WxOrderController {
         } catch (Exception ex) {
             txManager.rollback(status);
             logger.error("系统内部错误", ex);
-            return ResponseUtil.fail(403, "下单失败");
+            return ResponseUtil.fail(ORDER_CHECKOUT_FAIL, "下单失败");
         }
         txManager.commit(status);
 
@@ -471,7 +499,7 @@ public class WxOrderController {
         // 检测是否能够取消
         OrderHandleOption handleOption = OrderUtil.build(order);
         if (!handleOption.isCancel()) {
-            return ResponseUtil.fail(403, "订单不能取消");
+            return ResponseUtil.fail(ORDER_INVALID_OPERATION, "订单不能取消");
         }
 
         // 开启事务管理
@@ -498,7 +526,7 @@ public class WxOrderController {
         } catch (Exception ex) {
             txManager.rollback(status);
             logger.error("系统内部错误", ex);
-            return ResponseUtil.fail(403, "订单取消失败");
+            return ResponseUtil.fail(ORDER_CANCEL_FAIL, "订单取消失败");
         }
         txManager.commit(status);
 
@@ -509,7 +537,7 @@ public class WxOrderController {
      * 付款订单的预支付会话标识
      * <p>
      * 1. 检测当前订单是否能够付款
-     * 2. 微信支付平台返回支付订单ID
+     * 2. 微信商户平台返回支付订单ID
      * 3. 设置订单付款状态
      *
      * @param userId 用户ID
@@ -537,13 +565,13 @@ public class WxOrderController {
         // 检测是否能够取消
         OrderHandleOption handleOption = OrderUtil.build(order);
         if (!handleOption.isPay()) {
-            return ResponseUtil.fail(403, "订单不能支付");
+            return ResponseUtil.fail(ORDER_INVALID_OPERATION, "订单不能支付");
         }
 
         LitemallUser user = userService.findById(userId);
         String openid = user.getWeixinOpenid();
         if (openid == null) {
-            return ResponseUtil.fail(403, "订单不能支付");
+            return ResponseUtil.fail(AUTH_OPENID_UNACCESS, "订单不能支付");
         }
         WxPayMpOrderResult result = null;
         try {
@@ -573,7 +601,7 @@ public class WxOrderController {
 
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseUtil.fail(403, "订单不能支付");
+            return ResponseUtil.fail(ORDER_PAY_FAIL, "订单不能支付");
         }
 
         if (orderService.updateWithOptimisticLocker(order) == 0) {
@@ -587,7 +615,7 @@ public class WxOrderController {
      * <p>
      * 1. 检测当前订单是否是付款状态;
      * 2. 设置订单付款成功状态相关信息;
-     * 3. 响应微信支付平台.
+     * 3. 响应微信商户平台.
      * <p>
      *  注意，这里pay-notify是示例地址，建议开发者应该设立一个隐蔽的回调地址
      *
@@ -726,7 +754,7 @@ public class WxOrderController {
 
         OrderHandleOption handleOption = OrderUtil.build(order);
         if (!handleOption.isRefund()) {
-            return ResponseUtil.fail(403, "订单不能取消");
+            return ResponseUtil.fail(ORDER_INVALID_OPERATION, "订单不能取消");
         }
 
         // 设置订单申请退款状态
@@ -772,7 +800,7 @@ public class WxOrderController {
 
         OrderHandleOption handleOption = OrderUtil.build(order);
         if (!handleOption.isConfirm()) {
-            return ResponseUtil.fail(403, "订单不能确认收货");
+            return ResponseUtil.fail(ORDER_INVALID_OPERATION, "订单不能确认收货");
         }
 
         Short comments = orderGoodsService.getComments(orderId);
@@ -816,7 +844,7 @@ public class WxOrderController {
 
         OrderHandleOption handleOption = OrderUtil.build(order);
         if (!handleOption.isDelete()) {
-            return ResponseUtil.fail(403, "订单不能删除");
+            return ResponseUtil.fail(ORDER_INVALID_OPERATION, "订单不能删除");
         }
 
         // 订单order_status没有字段用于标识删除
@@ -885,17 +913,17 @@ public class WxOrderController {
         }
         Short orderStatus = order.getOrderStatus();
         if (!OrderUtil.isConfirmStatus(order) && !OrderUtil.isAutoConfirmStatus(order)) {
-            return ResponseUtil.fail(404, "当前商品不能评价");
+            return ResponseUtil.fail(ORDER_INVALID_OPERATION, "当前商品不能评价");
         }
         if (!order.getUserId().equals(userId)) {
-            return ResponseUtil.fail(404, "当前商品不属于用户");
+            return ResponseUtil.fail(ORDER_INVALID, "当前商品不属于用户");
         }
         Integer commentId = orderGoods.getComment();
         if (commentId == -1) {
-            return ResponseUtil.fail(404, "当前商品评价时间已经过期");
+            return ResponseUtil.fail(ORDER_COMMENT_EXPIRED, "当前商品评价时间已经过期");
         }
         if (commentId != 0) {
-            return ResponseUtil.fail(404, "订单商品已评价");
+            return ResponseUtil.fail(ORDER_COMMENTED, "订单商品已评价");
         }
 
         String content = JacksonUtil.parseString(body, "content");

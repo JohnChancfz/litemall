@@ -2,7 +2,7 @@
 
 项目技术架构：
 
-* 后台管理前端，即litemall-admin模块
+* 管理后台前端，即litemall-admin模块
   * vue
   * vuex
   * vue-router
@@ -10,7 +10,7 @@
   * element
   * vue-element-admin 3.9.3
   * 其他，见package.json
-* 后台管理后端, 即litemall-admin-api模块
+* 管理后台后端, 即litemall-admin-api模块
   * Spring Boot 2.x
   * Spring MVC
 
@@ -80,50 +80,46 @@
 
 ### 4.1.8 安全
 
-#### 4.1.8.1 Token
+这里的安全基于Shiro。
 
-用户登录成功以后，后端会返回`token`，之后用户的请求都会携带token。
+#### 4.1.8.1 认证
 
-目前token的失效和跟新机制没有涉及。
-
-#### 4.1.8.2 CROS
-
-如果litemall-admin-api不配置CROS，则Spring Boot会失败。
-
-#### 4.1.8.3 账号密码加盐
+#### 4.1.8.2 账号密码加盐
 
 如果是微信登录，那么无需账号和密码。
 
 而如果用户采用了账号和密码的形式登录，那么后端需要把用户密码加盐。
 
-#### 4.1.8.4 限制登录
-
-如果采用账号密码登录，那么登录失败一定次数，应该限制登录。
-
-进一步地，如果项目启用了短信功能，应该短信提醒用户，防止他人登录。
-
-目前这里没有实现，仅列出。
+#### 4.1.8.3 权限管理
 
 ### 4.1.9 定时任务
 
-AdminOrderController类存在以下三个方法，其实是三个定时任务：
-* checkOrderUnpaid
-* checkOrderUnconfirm
-* checkOrderComment
+job子包存在以下定时任务：
+* OrderJob类
+  * checkOrderUnpaid
+  * checkOrderUnconfirm
+  * checkOrderComment
+* CouponJob类
+  * checkCouponExpired
 
 注意：
 > 虽然定时任务放在AdminOrderController类中，但是可能这里不是很合适，
 > 以后需要调整或者完善。
 
-### 4.1.10 事务管理
-
-
 ## 4.2 litemall-admin
 
-本节介绍管理后台的前端模块。
+本章介绍管理后台的前端模块。
 
 litemall-admin模块的代码基于[vue-element-admin](https://github.com/PanJiaChen/vue-element-admin)
 
 ## 4.3 开发新组件
 
-这里介绍开发一个新的组件的流程。
+本章节介绍如何开发新的管理后台功能。
+
+### 4.3.1 管理后台前端页面
+
+### 4.3.2 前后端交互服务API
+
+### 4.3.3 管理后台后端服务
+
+### 4.3.4 数据库

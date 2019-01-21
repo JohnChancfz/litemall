@@ -2,7 +2,8 @@ package org.linlinjava.litemall.admin.web;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.linlinjava.litemall.admin.annotation.LoginAdmin;
+import org.apache.shiro.authz.annotation.RequiresPermissions;
+import org.linlinjava.litemall.admin.annotation.RequiresPermissionsDesc;
 import org.linlinjava.litemall.admin.dao.GoodsAllinone;
 import org.linlinjava.litemall.admin.util.CatVo;
 import org.linlinjava.litemall.core.qcode.QCodeService;
@@ -27,6 +28,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.linlinjava.litemall.admin.util.AdminResponseCode.GOODS_NAME_EXIST;
+import static org.linlinjava.litemall.admin.util.AdminResponseCode.GOODS_UPDATE_NOT_ALLOWED;
+
 @RestController
 @RequestMapping("/admin/goods")
 @Validated
@@ -48,21 +52,22 @@ public class AdminGoodsController {
     private LitemallCategoryService categoryService;
     @Autowired
     private LitemallBrandService brandService;
+    @Autowired
+    private LitemallCartService cartService;
+    @Autowired
+    private LitemallOrderGoodsService orderGoodsService;
 
     @Autowired
     private QCodeService qCodeService;
 
+    @RequiresPermissions("admin:goods:list")
+    @RequiresPermissionsDesc(menu={"商品管理" , "商品列表"}, button="查询")
     @GetMapping("/list")
-    public Object list(@LoginAdmin Integer adminId,
-                       String goodsSn, String name,
+    public Object list(String goodsSn, String name,
                        @RequestParam(defaultValue = "1") Integer page,
                        @RequestParam(defaultValue = "10") Integer limit,
                        @Sort @RequestParam(defaultValue = "add_time") String sort,
                        @Order @RequestParam(defaultValue = "desc") String order) {
-        if (adminId == null) {
-            return ResponseUtil.unlogin();
-        }
-
         List<LitemallGoods> goodsList = goodsService.querySelective(goodsSn, name, page, limit, sort, order);
         int total = goodsService.countSelective(goodsSn, name, page, limit, sort, order);
         Map<String, Object> data = new HashMap<>();
@@ -142,23 +147,26 @@ public class AdminGoodsController {
         return null;
     }
 
-    /*
+    /**
+     * 编辑商品
+     * <p>
      * TODO
      * 目前商品修改的逻辑是
      * 1. 更新litemall_goods表
-     * 2. 逻辑删除litemall_goods_specification、litemall_goods_attribute、litemall_product
-     * 3. 添加litemall_goods_specification、litemall_goods_attribute、litemall_product
+     * 2. 逻辑删除litemall_goods_specification、litemall_goods_attribute、litemall_goods_product
+     * 3. 添加litemall_goods_specification、litemall_goods_attribute、litemall_goods_product
      *
-     * 这里商品三个表的数据采用删除再跟新的策略是因为
-     * 商品编辑页面，管理员可以添加删除商品规格、添加删除商品属性，因此这里仅仅更新表是不可能的，
-     * 因此这里只能删除所有旧的数据，然后添加新的数据
+     * 这里商品三个表的数据采用删除再添加的策略是因为
+     * 商品编辑页面，支持管理员添加删除商品规格、添加删除商品属性，因此这里仅仅更新是不可能的，
+     * 只能删除三个表旧的数据，然后添加新的数据。
+     * 但是这里又会引入新的问题，就是存在订单商品货品ID指向了失效的商品货品表。
+     * 因此这里会拒绝管理员编辑商品，如果订单或购物车中存在商品。
+     * 所以这里可能需要重新设计。
      */
+    @RequiresPermissions("admin:goods:update")
+    @RequiresPermissionsDesc(menu={"商品管理" , "商品列表"}, button="编辑")
     @PostMapping("/update")
-    public Object update(@LoginAdmin Integer adminId, @RequestBody GoodsAllinone goodsAllinone) {
-        if (adminId == null) {
-            return ResponseUtil.unlogin();
-        }
-
+    public Object update(@RequestBody GoodsAllinone goodsAllinone) {
         Object error = validate(goodsAllinone);
         if (error != null) {
             return error;
@@ -168,6 +176,16 @@ public class AdminGoodsController {
         LitemallGoodsAttribute[] attributes = goodsAllinone.getAttributes();
         LitemallGoodsSpecification[] specifications = goodsAllinone.getSpecifications();
         LitemallGoodsProduct[] products = goodsAllinone.getProducts();
+
+        Integer id = goods.getId();
+        // 检查是否存在购物车商品或者订单商品
+        // 如果存在则拒绝修改商品。
+        if(orderGoodsService.checkExist(id)){
+            return ResponseUtil.fail(GOODS_UPDATE_NOT_ALLOWED, "商品已经在订单中，不能修改");
+        }
+        if(cartService.checkExist(id)){
+            return ResponseUtil.fail(GOODS_UPDATE_NOT_ALLOWED, "商品已经在购物车中，不能修改");
+        }
 
         // 开启事务管理
         DefaultTransactionDefinition def = new DefaultTransactionDefinition();
@@ -181,7 +199,7 @@ public class AdminGoodsController {
 
             // 商品基本信息表litemall_goods
             if (goodsService.updateById(goods) == 0) {
-                throw new Exception("跟新数据失败");
+                throw new Exception("更新数据失败");
             }
 
             Integer gid = goods.getId();
@@ -218,11 +236,10 @@ public class AdminGoodsController {
         return ResponseUtil.ok();
     }
 
+    @RequiresPermissions("admin:goods:delete")
+    @RequiresPermissionsDesc(menu={"商品管理" , "商品列表"}, button="删除")
     @PostMapping("/delete")
-    public Object delete(@LoginAdmin Integer adminId, @RequestBody LitemallGoods goods) {
-        if (adminId == null) {
-            return ResponseUtil.unlogin();
-        }
+    public Object delete(@RequestBody LitemallGoods goods) {
         Integer id = goods.getId();
         if (id == null) {
             return ResponseUtil.badArgument();
@@ -248,12 +265,10 @@ public class AdminGoodsController {
         return ResponseUtil.ok();
     }
 
+    @RequiresPermissions("admin:goods:create")
+    @RequiresPermissionsDesc(menu={"商品管理" , "商品上架"}, button="上架")
     @PostMapping("/create")
-    public Object create(@LoginAdmin Integer adminId, @RequestBody GoodsAllinone goodsAllinone) {
-        if (adminId == null) {
-            return ResponseUtil.unlogin();
-        }
-
+    public Object create(@RequestBody GoodsAllinone goodsAllinone) {
         Object error = validate(goodsAllinone);
         if (error != null) {
             return error;
@@ -266,7 +281,7 @@ public class AdminGoodsController {
 
         String name = goods.getName();
         if (goodsService.checkExistByName(name)) {
-            return ResponseUtil.fail(403, "商品名已经存在");
+            return ResponseUtil.fail(GOODS_NAME_EXIST, "商品名已经存在");
         }
 
         // 开启事务管理
@@ -283,7 +298,7 @@ public class AdminGoodsController {
             if (!StringUtils.isEmpty(url)) {
                 goods.setShareUrl(url);
                 if (goodsService.updateById(goods) == 0) {
-                    throw new Exception("跟新数据失败");
+                    throw new Exception("更新数据失败");
                 }
             }
 
@@ -314,13 +329,10 @@ public class AdminGoodsController {
         return ResponseUtil.ok();
     }
 
-
+    @RequiresPermissions("admin:goods:list")
+    @RequiresPermissionsDesc(menu={"商品管理" , "商品列表"}, button="查询")
     @GetMapping("/catAndBrand")
-    public Object list2(@LoginAdmin Integer adminId) {
-        if (adminId == null) {
-            return ResponseUtil.unlogin();
-        }
-
+    public Object list2() {
         // http://element-cn.eleme.io/#/zh-CN/component/cascader
         // 管理员设置“所属分类”
         List<LitemallCategory> l1CatList = categoryService.queryL1();
@@ -361,12 +373,10 @@ public class AdminGoodsController {
         return ResponseUtil.ok(data);
     }
 
+    @RequiresPermissions("admin:goods:read")
+    @RequiresPermissionsDesc(menu={"商品管理" , "商品列表"}, button="编辑")
     @GetMapping("/detail")
-    public Object detail(@LoginAdmin Integer adminId, @NotNull Integer id) {
-        if (adminId == null) {
-            return ResponseUtil.unlogin();
-        }
-
+    public Object detail(@NotNull Integer id) {
         LitemallGoods goods = goodsService.findById(id);
         List<LitemallGoodsProduct> products = productService.queryByGid(id);
         List<LitemallGoodsSpecification> specifications = specificationService.queryByGid(id);
